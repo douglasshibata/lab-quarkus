@@ -1,19 +1,17 @@
-version: '3.9'
 services:
 
   # REVERSE PROXY
-
-  ## https://doc.traefik.io/traefik/
+  ## Traefik reverse proxy and load balancer
   reverse-proxy:
     image: traefik:2.9.8
     command:
-      - --api.insecure=true
+      - --api.dashboard=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
     ports:
-      - 80:80
-      - 8080:8080
+      - "80:80"
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
@@ -25,9 +23,11 @@ services:
       service: quarkus
     build:
       context: ./election-management
-      # dockerfile: src/main/docker/Dockerfile.native
       dockerfile: src/main/docker/Dockerfile.jvm
     image: dio/election-management:${TAG:-1.0.0}
+    depends_on:
+      - database
+      - caching
     labels:
       - traefik.http.routers.election-management.rule=Host(`vote.dio.localhost`) && PathPrefix(`/api`)
       - traefik.http.routers.election-management.entrypoints=web
@@ -38,9 +38,11 @@ services:
       service: quarkus
     build:
       context: ./voting-app
-      # dockerfile: src/main/docker/Dockerfile.native
       dockerfile: src/main/docker/Dockerfile.jvm
     image: dio/voting-app:${TAG:-1.0.0}
+    depends_on:
+      - database
+      - caching
     labels:
       - traefik.http.routers.voting-app.rule=Host(`vote.dio.localhost`) && PathPrefix(`/api/voting`)
       - traefik.http.routers.voting-app.entrypoints=web
@@ -51,34 +53,36 @@ services:
       service: quarkus
     build:
       context: ./result-app
-      # dockerfile: src/main/docker/Dockerfile.native
       dockerfile: src/main/docker/Dockerfile.jvm
     image: dio/result-app:${TAG:-1.0.0}
+    depends_on:
+      - database
+      - caching
     labels:
       - traefik.http.routers.result-app.rule=Host(`vote.dio.localhost`) && Path(`/`)
       - traefik.http.routers.result-app.entrypoints=web
 
-  # DATABASE - https://quarkus.io/guides/datasource
-
-  ## https://mariadb.org/
+  # DATABASE - MariaDB relational database
   database:
     image: mariadb:10.11.2
     environment:
-      - MARIADB_ROOT_PASSWORD=root
+      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD:-root}
+      - MARIADB_DATABASE=${MARIADB_DATABASE:-election}
+    volumes:
+      - mariadb_data:/var/lib/mysql
 
-  # CACHING - https://quarkus.io/guides/redis
-
-  ## https://redis.io/
+  # CACHING - Redis in-memory cache
   caching:
     image: redis:7.0.9
+    volumes:
+      - redis_data:/data
 
-  # LOGGING - https://quarkus.io/guides/centralized-log-management
-
-  ## https://www.mongodb.com/
+  # LOGGING - Centralized logging pipeline
   mongodb:
     image: mongo:6.0.4
+    volumes:
+      - mongodb_data:/data/db
 
-  ## https://opensearch.org/
   opensearch:
     image: opensearchproject/opensearch:2.6.0
     environment:
@@ -87,17 +91,16 @@ services:
       - discovery.type=single-node
       - action.auto_create_index=false
       - plugins.security.ssl.http.enabled=false
-      - plugins.security.disabled=true
+      - plugins.security.disabled=${OPENSEARCH_SECURITY_DISABLED:-true}
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
 
-  ## https://www.graylog.org/
-  ### Graylog web console (System → Input → Select GELF UDP)
-  ### curl -H "Content-Type: application/json" -H "Authorization: Basic YWRtaW46YWRtaW4=" -H "X-Requested-By: curl" -X POST -v -d '{"title":"udp input","configuration":{"recv_buffer_size":262144,"bind_address":"0.0.0.0","port":12201,"decompress_size_limit":8388608},"type":"org.graylog2.inputs.gelf.udp.GELFUDPInput","global":true}' http://logging.private.dio.localhost/api/system/inputs
   graylog:
     image: graylog/graylog:5.0.5
     environment:
-      GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost:9000/"
-      GRAYLOG_PASSWORD_SECRET: "forpasswordencryption" # CHANGE ME (must be at least 16 characters)!
-      GRAYLOG_ROOT_PASSWORD_SHA2: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918" # Password: admin
+      GRAYLOG_HTTP_EXTERNAL_URI: "${GRAYLOG_HTTP_EXTERNAL_URI:-http://localhost:9000/}"
+      GRAYLOG_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET:-forpasswordencryption_secret_16chars}"
+      GRAYLOG_ROOT_PASSWORD_SHA2: "${GRAYLOG_ROOT_PASSWORD_SHA2:-8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918}"
       GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
@@ -113,18 +116,22 @@ services:
       - traefik.http.routers.graylog.service=graylog
       - traefik.http.services.graylog.loadbalancer.server.port=9000
 
-  # OPENTELEMETRY - https://quarkus.io/guides/opentelemetry
-
-  ## https://www.jaegertracing.io/
+  # OPENTELEMETRY - Tracing collector
   jaeger:
     image: jaegertracing/all-in-one:1.42.0
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     labels:
       - traefik.enable=true
-      - traefik.http.middlewares.admin-admin-auth.basicauth.users=admin:$$2y$$05$$B3PS97vYDsx6Hk4e/F8bSOGdB2uq.oabTU7SbMdjJKxdAeKKI8pTO
+      - traefik.http.middlewares.admin-admin-auth.basicauth.users=${JAEGER_BASICAUTH_USERS:-admin:$$2y$$05$$B3PS97vYDsx6Hk4e/F8bSOGdB2uq.oabTU7SbMdjJKxdAeKKI8pTO}
       - traefik.http.routers.jaeger.rule=Host(`telemetry.private.dio.localhost`)
       - traefik.http.routers.jaeger.entrypoints=web
       - traefik.http.routers.jaeger.service=jaeger
       - traefik.http.routers.jaeger.middlewares=admin-admin-auth@docker
       - traefik.http.services.jaeger.loadbalancer.server.port=16686
+
+volumes:
+  mariadb_data:
+  redis_data:
+  mongodb_data:
+  opensearch_data:
